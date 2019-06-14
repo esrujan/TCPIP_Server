@@ -1,7 +1,12 @@
 /* 
- * A TCP server implemenation where the port number is passed as an argument 
- * The server processes the TLV blobs sent by the client
- * It processes the information and writes it into the respective socket
+ * A TCP server implemenation where the port number is passed as an argument and data sent by client in a presribed format
+ * The server processes the TLV (Type-Length-Value) blobs sent by the client
+ * The "Type" is of 2 bytes and it has three valid values
+ * They are 0xE110 for "Hello", 0xDA7A for "Data" and 0x0B1E for "Goodbye"
+ * The "Length" is of 4 bytes and indicates how many bytes are sent in that particular blob
+ * The "Value" is of variable length(indicated by Length above) and is the actual length of the blob
+ * The server processes the information and summarizes every TLV blob and writes onto stdout in the following format:
+ * [SrcIP:SrcPort] [TYPE] [LENGTH] [First 4 bytes of VALUE in hex]
 */
 
 #include <stdio.h>
@@ -61,117 +66,116 @@ void ReadXBytes( int sockfd, unsigned int x, void *buffer )
 bool ServeClient( int newsockfd, struct sockaddr_in& cli_addr )
 {
 	int i, n, slen;
-        unsigned short type = 0;
-        unsigned int length = 0;
+	unsigned short type = 0;
+	unsigned int length = 0;
 	char * buffer = 0;
-        bool last = false;
+	bool last = false;
 	bool closed = false;
 	time_t futur = time( NULL ) + 10; // Setting a time limit for a single client
 	
-        while ( true )
-        {
-                // First read two bytes
-                ReadXBytes( newsockfd, 2, (void*)(&type) );
-                type = htons( type );
-                //cout << std::hex << type << endl;
+	while ( true )
+	{
+		// First read two bytes
+		ReadXBytes( newsockfd, 2, (void*)(&type) );
+		type = htons( type );
 
-                // Then read 4 bytes and store in integer "Len"
-                ReadXBytes( newsockfd, sizeof(length), (void*)(&length) );
-                length = htonl( length );
-                //cout << length << endl;
+		// Then read 4 bytes and store in integer "Len"
+		ReadXBytes( newsockfd, sizeof(length), (void*)(&length) );
+		length = htonl( length );
+		
+		// Allocating the memory for "buffer"
+		buffer = new char[ length ];
+		bzero( buffer, length );
+		// Then read as many bytes as "length" indicated above
+		ReadXBytes( newsockfd, length, buffer );
 
-                // Allocating the memory for "buffer"
-                buffer = new char[ length ];
-                bzero( buffer, length );
-                // Then read as many bytes as "length" indicated above
-                ReadXBytes( newsockfd, length, buffer );
+		write( newsockfd, "[", 1 );
+		char *cli_ipaddr = inet_ntoa( cli_addr.sin_addr );
+		int slen = strlen( cli_ipaddr );
+		write( newsockfd, cli_ipaddr, slen );
+		write( newsockfd, ":", 1 );
 
-                write( newsockfd, "[", 1 );
-                char *cli_ipaddr = inet_ntoa( cli_addr.sin_addr );
-                int slen = strlen( cli_ipaddr );
-                write( newsockfd, cli_ipaddr, slen );
-                write( newsockfd, ":", 1 );
+		string str_port = to_string( ntohs( cli_addr.sin_port ) );
+		slen = str_port.size();
+		write( newsockfd, ( char * ) str_port.c_str(), slen );
+		write( newsockfd, "] ", 2 );
 
-                string str_port = to_string( ntohs( cli_addr.sin_port ) );
-                slen = str_port.size();
-                write( newsockfd, ( char * ) str_port.c_str(), slen );
-                write( newsockfd, "] ", 2 );
+		// Using a switch statement to detect the correct type of message
+		switch( type )
+		{
+			case 0xE110:
+			n = write( newsockfd, "[Hello] ", 8 );
+			break;
 
-                // Using a switch statement to detect the correct type of message
-                switch( type )
-                {
-                        case 0xE110:
-                                n = write( newsockfd, "[Hello] ", 8 );
-                        break;
+			case 0xDA7A:
+			n = write( newsockfd, "[Data] ", 7 );
+			break;
 
-                        case 0xDA7A:
-                                n = write( newsockfd, "[Data] ", 7 );
-                        break;
+			case 0x0B1E:
+			n = write( newsockfd, "[Goodbye] ", 10 );
+			// Since the client has sent a "Good bye", 
+			// I assume it indicates the last TLV blob 
+			// from the client
+			last = true;
+			break;
 
-                        case 0x0B1E:
-                                n = write( newsockfd, "[Goodbye] ", 10 );
-				// Since the client has sent a "Good bye", 
-				// I assume it indicates the last TLV blob 
-				// from the client
-                                last = true;
-                        break;
+			default:
+			error( "The given TYPE cannot be parsed\n" );
+		}
+		if ( n < 0 )
+			error( "ERROR writing to socket" );
 
-                        default:
-                                error( "The given TYPE cannot be parsed\n" );
-                }
-                if ( n < 0 )
-                        error( "ERROR writing to socket" );
-
-                n = write( newsockfd, "[", 1 );
+		n = write( newsockfd, "[", 1 );
 		if ( n < 0 )
 			error( "ERROR writing to the socket" );
-                string str_len = to_string( length );
-                slen = str_len.size();
-                n = write( newsockfd, str_len.c_str(), slen );
+		string str_len = to_string( length );
+		slen = str_len.size();
+		n = write( newsockfd, str_len.c_str(), slen );
 		if ( n < 0 )
 			error( "ERROR writing to the socket" );
-                n = write( newsockfd, "] [", 3 );
-                if ( n < 0 )
+		
+		n = write( newsockfd, "] [", 3 );
+		if ( n < 0 )
 			error( "ERROR writing to the socket" );
 		
-                i = 0;
-                vector<unsigned char> v;
-                string res;
-                if ( length > 0 ) {
-                        while ( length > 0 && i < 4 ) {
-                                v.push_back( buffer[ i++ ] );
-                                length--;
-                        }
-                        boost::algorithm::hex( v.begin(), v.end(), back_inserter( res ) );
-                }
-		 
-                char C_res[ res.size()+1 ];
-                strcpy( C_res, res.c_str() );
+		i = 0;
+		vector<unsigned char> v;
+		string res;
+		if ( length > 0 ) {
+			while ( length > 0 && i < 4 ) {
+				v.push_back( buffer[ i++ ] );
+				length--;
+			}
+		boost::algorithm::hex( v.begin(), v.end(), back_inserter( res ) );
+		}
+
+		char C_res[ res.size()+1 ];
+		strcpy( C_res, res.c_str() );
 		
-                for ( int j = 0; j < i; j++ ) {
-                        n = write( newsockfd, "0x", 2 );
+		for ( int j = 0; j < i; j++ ) {
+			n = write( newsockfd, "0x", 2 );
 			if ( n < 0 )
 				error( "ERROR writing to the socket" );
-                        n = write( newsockfd, C_res + 2*j, 1 );
+			n = write( newsockfd, C_res + 2*j, 1 );
 			if ( n < 0 )
 				error( "ERROR writing to the socket" );
-                        n = write( newsockfd, C_res + 2*j+1, 1 );
+			n = write( newsockfd, C_res + 2*j+1, 1 );
 			if ( n < 0 )
 				error( "ERROR writing to the socket" );
-                        if ( j != i-1 )
+			if ( j != i-1 )
 			{
 				n = write ( newsockfd, " ", 1 );
 				if ( n < 0 )
 					error( "ERROR writing to the socket" );
 			}
-                }
+		}
 		
-                n = write( newsockfd, "]\n", 2 );
+		n = write( newsockfd, "]\n", 2 );
 		if ( n < 0 )
 			error( "ERROR writing to the socket" );
 		
-                // Releasing the memory allocated for the "buffer"
-                delete buffer;
+			// Releasing the memory allocated for the "buffer"
+			delete buffer;
 		
 		if ( time( NULL ) > futur )
         	{
@@ -186,7 +190,7 @@ bool ServeClient( int newsockfd, struct sockaddr_in& cli_addr )
 			closed = true;
 			break;
 		}
-        }
+	}
 	return closed;
 }
 
@@ -213,8 +217,8 @@ int main( int argc, char *argv[] )
 		exit( 1 );
 	}
 	
-        cout << "Enter the maximum number of clients that can be served:";
-        cin >> max_clients;
+	cout << "Enter the maximum number of clients that can be served:";
+	cin >> max_clients;
 	if ( max_clients < 1 )
 		error( "The maximum number of clients must be 1 or greater\n" );
 	client_socket = new int[ max_clients ];
@@ -273,7 +277,7 @@ int main( int argc, char *argv[] )
 		
 		// Wait as long as we see activity on one of the sockets
 		activity = select( max_sd + 1, &readfds, NULL, NULL, NULL );
-		
+
 		// If there is an error, report it but do not exit
 		if ( activity < 0 && errno != EINTR )
 			perror( "Error in Select function" );
@@ -284,9 +288,9 @@ int main( int argc, char *argv[] )
 		{
 			// Try to accept the new connection
 			newsockfd = accept( master_socket, ( struct sockaddr * ) &cli_addr, &clilen );
-        		if ( newsockfd < 0 )
-                		error( "ERROR on accepting a connection" );
-			
+			if ( newsockfd < 0 )
+				error( "ERROR on accepting a connection" );
+
 			// If we are able to connect with the client, let us place that in the next available slot in client_socket
 			for ( int i = 0; i < max_clients; i++ )
 			{
